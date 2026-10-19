@@ -16,6 +16,10 @@ python3 scripts/audit.py out/работа_nk.docx                   # что о�
 ACCEPT=1 scripts/render_check.sh out/работа_nk.docx out        # PDF и PNG страниц
 ```
 
+Если есть только PDF: `python3 scripts/pdf_audit.py работа.pdf --profile gost-r-7.0.11-2011-dissertation` — проверка без исправлений.
+
+Правила откалиброваны на 14 защищённых диссертациях и 5 авторефератах: см. `references/calibration-2026-10.md`.
+
 ## Как пользоваться агентом
 
 - **Claude Code** — откройте репозиторий, приложите .docx и напишите «проверь оформление по ГОСТ». Скилл `.claude/skills/normokontrol/` подключится сам.

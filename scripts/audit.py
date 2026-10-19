@@ -159,7 +159,11 @@ class Audit:
                 continue
             for side, need in margins.items():
                 have = nk.mm(getattr(s, f"{side}_margin"))
-                if abs(have - need) > tol:
+                if have - need > tol:
+                    self.add("page.margins_wider", "Страница", "info", "auto",
+                             f"Раздел {n}: {names[side]} поле {have:.1f} мм — шире нормы ({need} мм); "
+                             "советы такое обычно принимают.")
+                elif need - have > tol:
                     self.add("page.margins", "Страница", "error", "auto",
                              f"Раздел {n}: {names[side]} поле {have:.1f} мм, нужно {need} мм.")
 
@@ -224,12 +228,14 @@ class Audit:
             return
         pos = cfg.get("position", "bottom_center")
         for in_footer, p_el in found:
+            # калибровка: у 13 из 14 защищённых диссертаций корпуса номер не там, где требует ГОСТ Р 7.0.11
+            note = " Советы часто принимают другое положение — сверьтесь с их требованиями."
             if pos.startswith("bottom") and not in_footer:
-                self.add("page_numbers.position", "Нумерация страниц", "error", "claude",
-                         "Номер страницы в верхнем колонтитуле, нужен в нижнем.")
+                self.add("page_numbers.position", "Нумерация страниц", "warning", "claude",
+                         "Номер страницы в верхнем колонтитуле, по стандарту — в нижнем." + note)
             if pos.startswith("top") and in_footer:
-                self.add("page_numbers.position", "Нумерация страниц", "error", "claude",
-                         "Номер страницы в нижнем колонтитуле, нужен в верхнем.")
+                self.add("page_numbers.position", "Нумерация страниц", "warning", "claude",
+                         "Номер страницы в нижнем колонтитуле, по стандарту — в верхнем." + note)
             jc = p_el.find(f"{nk.qn('w:pPr')}/{nk.qn('w:jc')}")
             jc_val = None if jc is None else jc.get(nk.qn("w:val"))
             if pos.endswith("center") and jc_val != "center" and "\t" not in nk.para_text(p_el):
@@ -418,9 +424,13 @@ class Audit:
         if m.group("sp") != " ":
             self.add(f"{kind}.caption_format", cat, "error", "auto",
                      f"Нет пробела между словом и номером (образец: «{sample}»).", b.where())
-        if sep != " — ":
+        if sep.strip() == "–" and sep != " — ":
+            # калибровка по корпусу защищённых работ: «–» — самый частый вариант, советы его принимают
+            self.add(f"{kind}.caption_en_dash", cat, "info", "auto",
+                     f"Короткое тире «–» вместо «—» (образец: «{sample}»). Типографская мелочь.", b.where())
+        elif sep != " — ":
             marks = sep.strip() or "ничего"
-            self.add(f"{kind}.caption_format", cat, "error", "auto",
+            self.add(f"{kind}.caption_format", cat, "warning", "auto",
                      f"Между номером и названием «{marks}» вместо тире «—» (образец: «{sample}»).", b.where())
         if cfg.get("caption_trailing_dot") is False and title.rstrip().endswith(".") \
                 and not re.search(r"\b\w{1,2}\.$", title.rstrip()):
@@ -508,6 +518,9 @@ class Audit:
             if nk.normalize_heading(must) in present:
                 continue
             alt = next((a for a in aliases.get(must, []) if nk.normalize_heading(a) in present), None)
+            if not alt:  # «ОБЩИЕ ВЫВОДЫ И ЗАКЛЮЧЕНИЕ», «ВВЕДЕНИЕ. ОБЩАЯ ХАРАКТЕРИСТИКА РАБОТЫ»
+                alt = next((b.text.strip() for b in self.blocks if b.kind == "p" and not b.in_table
+                            and b.role in ("heading_section", "body") and nk.heading_variant(b.text, must)), None)
             if alt:
                 self.add("structure.renamed", "Структура", "info", "author",
                          f"Элемент «{must}» назван «{alt}». Стандарт перечисляет элементы, но не требует "
@@ -600,9 +613,7 @@ class Audit:
             if plain and plain != list(range(1, len(plain) + 1)) and len(plain) == len(numbers):
                 self.add(f"{kind}.numbering_order", cat, "warning", "author",
                          f"Нумерация идёт не по порядку: {', '.join(map(str, plain))}.")
-            refs = set()
-            for m in re.finditer(rf"\b{word}\s*((?:[А-ЯA-Z]\.)?\d+(?:\.\d+)*)", body_text, re.I):
-                refs.add(m.group(1))
+            refs = nk.expand_refs(body_text, word)
             for r in sorted(refs - set(numbers)):
                 self.add(f"{kind}.ref_missing", cat, "error", "author",
                          f"В тексте есть ссылка на {'рисунок' if kind == 'figure' else 'таблицу'} {r}, "

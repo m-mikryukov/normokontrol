@@ -153,7 +153,7 @@ def test_dissertation_profile(tmp_path):
     build_dissertation(str(src))
     pid = "gost-r-7.0.11-2011-dissertation"
     found = rules(audit_with(src, pid))
-    for rule in ("page.margins", "page_numbers.missing", "text.size_max", "text.indent",
+    for rule in ("page.margins_wider", "page_numbers.missing", "text.size_max", "text.indent",
                  "headings.section.new_page", "headings.section.alignment", "headings.struct.new_page"):
         assert rule in found, rule
     # ГОСТ Р 7.0.11 не задаёт гарнитуру и регистр — такие правила не проверяем
@@ -268,3 +268,55 @@ def test_citations_parsing():
     from audit import parse_citations
 
     assert parse_citations("см. [3; 7], [4–6], [10, с. 81], [2, с. 5; 9], [3, 7]") == [3, 7, 4, 5, 6, 10, 2, 9, 3, 7]
+
+
+# ---------------------------------------------------------------- калибровка по корпусу защищённых работ
+
+def test_heading_normalization_variants():
+    for raw in ("1. ВВЕДЕНИЕ", "III.ЗАКЛЮЧЕНИЕ", "В В Е Д Е Н И Е", "Введение.", "СОДЕРЖАНИЕ:"):
+        assert nk.normalize_heading(raw) in ("ВВЕДЕНИЕ", "ЗАКЛЮЧЕНИЕ", "СОДЕРЖАНИЕ"), raw
+    assert nk.normalize_heading("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ1") == "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ"
+    assert nk.heading_variant("ОБЩИЕ ВЫВОДЫ И ЗАКЛЮЧЕНИЕ", "ЗАКЛЮЧЕНИЕ")
+    assert nk.heading_variant("ВВЕДЕНИЕ. ОБЩАЯ ХАРАКТЕРИСТИКА РАБОТЫ", "ВВЕДЕНИЕ")
+    assert not nk.heading_variant("в заключение отметим, что результаты", "ЗАКЛЮЧЕНИЕ")
+
+
+def test_expand_refs_ranges():
+    word = r"рис(?:\.|ун(?:ок|ка|ке|ком|ки|ках|ков|кам|ками))"
+    assert nk.expand_refs("см. рисунки 11–14 и рис. 2.1", word) == {"11", "12", "13", "14", "2.1"}
+
+
+def test_en_dash_caption_is_info_not_error(tmp_path):
+    doc = _doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Схема на рисунке 1.")
+    doc.add_paragraph("Рисунок 1 – Схема")
+    found = Audit(doc, nk.load_profile("gost-r-7.0.11-2011-dissertation")).run()
+    sev = {f.rule: f.severity for f in found}
+    assert sev.get("figure.caption_en_dash") == "info" and "figure.caption_format" not in sev
+
+
+@pytest.mark.skipif(not shutil.which("soffice"), reason="нет LibreOffice")
+def test_pdf_audit_on_rendered_sample(tmp_path):
+    """PDF-проверка на отрендеренной учебной диссертации: видит поля, кегль и отсутствие номеров."""
+    import pdf_audit
+
+    from docx.shared import Mm, Pt
+
+    src = tmp_path / "diss.docx"
+    doc = _doc()
+    doc.styles["Normal"].font.name = "Times New Roman"
+    doc.styles["Normal"].font.size = Pt(16)
+    s = doc.sections[0]
+    s.page_width, s.page_height = Mm(210), Mm(297)
+    s.left_margin, s.right_margin, s.top_margin, s.bottom_margin = Mm(25), Mm(10), Mm(20), Mm(20)
+    for i in range(80):
+        doc.add_paragraph("Текст абзаца диссертации для измерения полей и кегля, достаточно длинный, "
+                          "чтобы занять несколько строк на странице. " * 2)
+    doc.save(src)
+    subprocess.run(["soffice", f"-env:UserInstallation=file://{tmp_path}/lo", "--headless", "--convert-to", "pdf",
+                    "--outdir", str(tmp_path), str(src)], check=True, capture_output=True, timeout=180)
+    a = pdf_audit.PdfAudit(str(tmp_path / "diss.pdf"), nk.load_profile("gost-r-7.0.11-2011-dissertation"))
+    found = rules(a.run())
+    assert a.stats["size_pt"] == 16.0
+    assert "text.size_max" in found and "page_numbers.missing" in found

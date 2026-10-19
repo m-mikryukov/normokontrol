@@ -482,7 +482,49 @@ def match_caption(text: str, kind: str):
 
 
 def normalize_heading(text: str) -> str:
-    return " ".join(text.replace(" ", " ").split()).rstrip(".").upper()
+    """Ключ для сравнения заголовков: «1. Введение.» и «В В Е Д Е Н И Е» → «ВВЕДЕНИЕ».
+
+    Снимает номер впереди («1.», «III.», «Глава» не трогает), знак сноски в конце
+    («ИСТОЧНИКОВ1»), разрядку и точку в конце.
+    """
+    t = " ".join(text.replace("\u00a0", " ").split())
+    t = re.sub(r"^(?:[IVXLC]+|\d{1,2})\.\s*(?=[^\d\s])", "", t)       # «1. ВВЕДЕНИЕ», «III.ЗАКЛЮЧЕНИЕ»
+    t = re.sub(r"(?<=[А-ЯЁA-Zа-яё])\d{1,2}$", "", t)                    # «ИСТОЧНИКОВ1» — знак сноски
+    words = t.split()
+    if len(words) > 3 and all(len(w) == 1 for w in words):              # «В В Е Д Е Н И Е»
+        t = "".join(words)
+    return t.rstrip(".:").upper()
+
+
+def expand_refs(text: str, word: str) -> set[str]:
+    """Номера из ссылок «рисунок 3», «рис. 2.1», «рисунки 11–14», «таблицы 2 и 3»."""
+    out: set[str] = set()
+    num = r"(?:[А-ЯA-Z]\.)?\d+(?:\.\d+)*"
+    for m in re.finditer(rf"\b{word}\s*({num}(?:\s*(?:[,–—-]|и)\s*{num})*)", text, re.I):
+        parts = re.findall(rf"{num}|[–—-]", m.group(1))
+        prev = None
+        for i, p in enumerate(parts):
+            if p in "–—-":
+                continue
+            if i >= 2 and parts[i - 1] in "–—-" and prev and prev.isdigit() and p.isdigit() and 0 < int(p) - int(prev) < 30:
+                out |= {str(k) for k in range(int(prev), int(p) + 1)}
+            out.add(p)
+            prev = p
+    return out
+
+
+def heading_variant(text: str, required: str) -> bool:
+    """Заголовок — вариант обязательного элемента: «ОБЩИЕ ВЫВОДЫ И ЗАКЛЮЧЕНИЕ» для «ЗАКЛЮЧЕНИЕ»."""
+    key, req = normalize_heading(text), normalize_heading(required)
+    if not key or len(key) > 90 or key == req:
+        return key == req
+    raw = text.strip()
+    letters = [c for c in raw if c.isalpha()]
+    upper = letters and sum(c.isupper() for c in letters) / len(letters) > 0.8
+    short = len(raw.split()) <= 6 and raw[:1].isupper() and not re.search(r"[,;:]", raw)
+    if not (upper or short):
+        return False
+    return re.search(rf"(^|\s){re.escape(req)}(?=$|[\s.,:;—–-])", key) is not None
 
 
 def classify(doc, blocks: list[Block], profile: dict) -> None:
