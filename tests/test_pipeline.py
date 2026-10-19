@@ -192,3 +192,79 @@ def test_page_break_after_heading_text_is_not_before(tmp_path):
     doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
     blocks = nk.iter_blocks(doc)
     assert nk.starts_new_page(doc, blocks, 2)
+
+
+# ---------------------------------------------------------------- случаи из реальных диссертаций
+
+def _doc():
+    from docx import Document
+    return Document()
+
+
+def _classified(doc, profile_id="gost-r-7.0.11-2011-dissertation"):
+    blocks = nk.iter_blocks(doc)
+    nk.classify(doc, blocks, nk.load_profile(profile_id))
+    return [b for b in blocks if b.kind == "p"]
+
+
+def test_heading_style_on_paragraphs_does_not_make_them_chapters():
+    doc = _doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_heading("ГЛАВА 1. ОБЗОР", level=1)
+    doc.add_heading("1.2 Механизмы", level=1)       # параграф, оформленный стилем главы
+    doc.add_heading("Выводы 1 главы", level=1)
+    levels = {b.text: b.extra.get("level") for b in _classified(doc) if b.role == "heading_section"}
+    assert levels == {"ГЛАВА 1. ОБЗОР": 1, "1.2 Механизмы": 2, "Выводы 1 главы": 2}
+
+
+def test_inline_appendix_title_ends_bibliography():
+    doc = _doc()
+    doc.add_paragraph("СПИСОК ЛИТЕРАТУРЫ")
+    doc.add_paragraph("Иванов, И. И. Книга. – Москва, 2020. – 10 с.")
+    doc.add_heading("Приложение А. Классификация механизмов", level=1)
+    doc.add_paragraph("Текст приложения.")
+    roles = [b.role for b in _classified(doc)]
+    assert roles == ["heading_struct", "bib_entry", "heading_appendix", "body"]
+
+
+def test_split_caption_and_continuation_roles():
+    doc = _doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    doc.add_paragraph("Рисунок 8 – Траектория изменения уровня")
+    doc.add_paragraph("отрасли России (1920-2021).")
+    doc.add_paragraph("Окончание рисунка 7")
+    roles = [b.role for b in _classified(doc)]
+    assert roles[1:] == ["caption_figure", "caption_tail", "continuation"]
+
+
+def test_formula_layout_table_needs_no_caption():
+    doc = _doc()
+    doc.add_paragraph("ВВЕДЕНИЕ")
+    t = doc.add_table(rows=1, cols=2)
+    t.cell(0, 0).text = "A = B + C"
+    t.cell(0, 1).text = "(2)"
+    found = Audit(doc, nk.load_profile("gost-r-7.0.11-2011-dissertation")).run()
+    assert "table.no_caption" not in rules(found)
+
+
+def test_landscape_sections_with_opposite_binding(tmp_path):
+    from docx.enum.section import WD_ORIENT
+    from docx.shared import Mm
+
+    doc = _doc()
+    s = doc.sections[0]
+    s.page_width, s.page_height = Mm(210), Mm(297)
+    s.left_margin, s.right_margin, s.top_margin, s.bottom_margin = Mm(25), Mm(10), Mm(20), Mm(20)
+    for top, bottom in ((25, 10), (10, 25)):
+        ns = doc.add_section()
+        ns.orientation = WD_ORIENT.LANDSCAPE
+        ns.page_width, ns.page_height = Mm(297), Mm(210)
+        ns.left_margin, ns.right_margin, ns.top_margin, ns.bottom_margin = Mm(20), Mm(20), Mm(top), Mm(bottom)
+    found = rules(Audit(doc, nk.load_profile("gost-r-7.0.11-2011-dissertation")).run())
+    assert "page.landscape_binding" in found and "page.landscape_margins" not in found
+
+
+def test_citations_parsing():
+    from audit import parse_citations
+
+    assert parse_citations("см. [3; 7], [4–6], [10, с. 81], [2, с. 5; 9], [3, 7]") == [3, 7, 4, 5, 6, 10, 2, 9, 3, 7]

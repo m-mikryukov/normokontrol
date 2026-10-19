@@ -35,6 +35,37 @@ ALIGN_RU = {WD_ALIGN_PARAGRAPH.JUSTIFY: "по ширине", WD_ALIGN_PARAGRAPH.
 A4 = (210.0, 297.0)
 
 
+def parse_citations(text: str) -> list[int]:
+    """Номера источников из ссылок [5], [5, с. 12], [3; 7], [4–6], [2, с. 5; 9]."""
+    cited: list[int] = []
+    for m in re.finditer(r"\[([^\[\]]{1,200})\]", text):
+        body = m.group(1)
+        if not re.match(r"^\s*\d", body):
+            continue
+        parts = re.split(r";", body)
+        if len(parts) == 1 and not re.search(r"\b(с|С|p|P)\.", body):
+            parts = re.split(r",", body)  # [3, 7] без страниц
+        for part in parts:
+            rng = re.match(r"^\s*(\d+)\s*[–—\-]\s*(\d+)\s*$", part)
+            one = re.match(r"^\s*(\d+)\b", part)
+            if rng:
+                a, b = int(rng.group(1)), int(rng.group(2))
+                if 0 < b - a < 50:
+                    cited += list(range(a, b + 1))
+            elif one:
+                cited.append(int(one.group(1)))
+    return cited
+
+
+def is_layout_table(b) -> bool:
+    """Таблица-обёртка для формулы и её номера — подпись ей не нужна."""
+    el = b.el
+    if any(True for _ in el.iter(f"{{{nk.M_NS}}}oMath")):
+        return True
+    texts = [nk.para_text(p).strip() for p in el.iter(nk.qn("w:p"))]
+    return any(re.fullmatch(r"\([А-ЯA-Z]?\.?\d+(\.\d+)*\)", t) for t in texts if t)
+
+
 def caption_spacing_ok(doc, b, need: float) -> bool:
     ls = nk.eff_para(doc, b.obj, "line_spacing")
     if ls is None:  # не задан нигде — в Word это одинарный
@@ -60,6 +91,7 @@ class Audit:
         self.blocks = nk.iter_blocks(doc)
         nk.classify(doc, self.blocks, profile)
         self.findings: list[Finding] = []
+        self._landscape_binding: dict[str, list[int]] = {}
 
     def add(self, rule, category, severity, fix, message, where=None):
         self.findings.append(Finding(rule, category, severity, fix, message, where))
@@ -68,6 +100,7 @@ class Audit:
 
     def run(self) -> list[Finding]:
         self.check_page()
+        self._report_landscape_binding()
         self.check_page_numbers()
         for i, b in enumerate(self.blocks):
             if b.kind != "p":
@@ -78,6 +111,13 @@ class Audit:
                 self.check_runs(b, "Основной текст")
                 if role == "body":
                     self.check_pseudo_heading(b)
+            elif role == "caption_tail":
+                cat = "Рисунки" if self.blocks[i - 1].role == "caption_figure" else "Таблицы"
+                self.add("caption.split", cat, "error", "claude",
+                         "Подпись разбита клавишей Enter на два абзаца: вторая строка стала обычным текстом. "
+                         "Нужен один абзац (перенос строки — автоматический).", b.where())
+            elif role == "note":
+                self.check_runs(b, "Основной текст", size=False)
             elif role == "heading_struct":
                 self.check_struct_heading(i, b)
             elif role == "heading_appendix":
@@ -94,6 +134,7 @@ class Audit:
                 self.check_runs(b, "Таблицы", size=False,
                                 size_min=nk.prof(self.p, "text.table_text_size_pt_min"))
         self.check_tables_have_captions()
+        self.check_merged_captions()
         self.check_structure()
         self.check_cross_refs()
         self.check_bibliography()
@@ -114,14 +155,44 @@ class Audit:
                     self.add("page.size", "Страница", "error", "auto",
                              f"Раздел {n}: формат {w:.0f}×{h:.0f} мм, нужен A4 (210×297 мм).")
             if landscape:
-                self.add("page.landscape", "Страница", "info", "claude",
-                         f"Раздел {n}: альбомная ориентация — поля проверьте вручную.")
+                self._check_landscape(n, s, margins, tol)
                 continue
             for side, need in margins.items():
                 have = nk.mm(getattr(s, f"{side}_margin"))
                 if abs(have - need) > tol:
                     self.add("page.margins", "Страница", "error", "auto",
                              f"Раздел {n}: {names[side]} поле {have:.1f} мм, нужно {need} мм.")
+
+    def _check_landscape(self, n, s, margins, tol):
+        """Альбомный лист: поля портретной страницы, повёрнутые на 90°.
+
+        Поле под переплёт (левое) у альбомного листа оказывается сверху или снизу —
+        стандарт сторону не задаёт, но во всей работе она должна быть одна.
+        """
+        if not margins:
+            return
+        have = {k: nk.mm(getattr(s, f"{k}_margin")) for k in ("left", "right", "top", "bottom")}
+        want_tb = sorted((margins.get("left", 0), margins.get("right", 0)))
+        want_lr = sorted((margins.get("top", 0), margins.get("bottom", 0)))
+        ok_tb = all(abs(a - b) <= tol for a, b in zip(sorted((have["top"], have["bottom"])), want_tb))
+        ok_lr = all(abs(a - b) <= tol for a, b in zip(sorted((have["left"], have["right"])), want_lr))
+        if not (ok_tb and ok_lr):
+            self.add("page.landscape_margins", "Страница", "error", "claude",
+                     f"Раздел {n} (альбомный): поля {have['left']:.0f}/{have['right']:.0f}/{have['top']:.0f}/"
+                     f"{have['bottom']:.0f} мм (л/п/в/н) не совпадают с повёрнутыми полями книжного листа.")
+            return
+        binding = "top" if have["top"] > have["bottom"] else "bottom"
+        self._landscape_binding.setdefault(binding, []).append(n)
+
+    def _report_landscape_binding(self):
+        sides = self._landscape_binding
+        if len(sides) > 1:
+            minority = min(sides.values(), key=len)
+            side = "снизу" if minority is sides.get("bottom") else "сверху"
+            self.add("page.landscape_binding", "Страница", "warning", "claude",
+                     f"Альбомные листы повёрнуты по-разному: в разделах {', '.join(map(str, minority))} поле "
+                     f"под переплёт {side}, в остальных — с другой стороны. На этих листах широкое поле "
+                     "окажется не со стороны переплёта.")
 
     # ------------------------------------------------------------ номера страниц
 
@@ -288,15 +359,28 @@ class Audit:
                 self.add("headings.struct.case", "Заголовки", "error", "auto",
                          "Заголовок структурного элемента не прописными буквами.", b.where())
         self._check_indent(b, 0, "headings.struct.indent", "Заголовки")
-        if cfg.get("new_page") and not nk.starts_new_page(self.doc, self.blocks, i):
-            self.add("headings.struct.new_page", "Заголовки", "error", "auto",
-                     "Структурный элемент начинается не с новой страницы.", b.where())
+        if cfg.get("new_page"):
+            self._check_new_page(i, b, "headings.struct.new_page", "Структурный элемент")
         bib = nk.normalize_heading(nk.prof(self.p, "bibliography.heading", ""))
         aliases = {nk.normalize_heading(a) for a in nk.prof(self.p, "bibliography.heading_aliases", [])}
-        if nk.normalize_heading(b.text) in aliases and bib:
+        struct_alts = (nk.prof(self.p, "headings.structural_elements.aliases", {}) or {}).get(
+            nk.prof(self.p, "bibliography.heading", ""), [])
+        renamed_ok = nk.normalize_heading(b.text) in {nk.normalize_heading(a) for a in struct_alts}
+        if nk.normalize_heading(b.text) in aliases and bib and not renamed_ok:
             self.add("bibliography.heading", "Ссылки и источники", "error", "claude",
                      f"Заголовок списка источников должен быть «{nk.prof(self.p, 'bibliography.heading')}».",
                      b.where())
+
+    def _check_new_page(self, i, b, rule, what):
+        if nk.starts_new_page(self.doc, self.blocks, i):
+            return
+        if nk.rendered_break_before(b):
+            self.add(f"{rule}_soft", "Заголовки", "warning", "auto",
+                     f"{what} начинается с новой страницы только за счёт пустых абзацев или переполнения "
+                     "страницы — при правке текста съедет. Нужен разрыв страницы или «с новой страницы».",
+                     b.where())
+        else:
+            self.add(rule, "Заголовки", "error", "auto", f"{what} начинается не с новой страницы.", b.where())
 
     def check_appendix_heading(self, i, b):
         cfg = nk.prof(self.p, "appendices", {})
@@ -305,17 +389,15 @@ class Audit:
             self.add("appendix.alignment", "Заголовки", "error", "auto",
                      f"Заголовок приложения выровнен {ALIGN_RU.get(al, al)}, нужно {ALIGN_RU[ALIGN[cfg['alignment']]]}.",
                      b.where())
-        if cfg.get("new_page") and not nk.starts_new_page(self.doc, self.blocks, i):
-            self.add("appendix.new_page", "Заголовки", "error", "auto",
-                     "Приложение начинается не с новой страницы.", b.where())
+        if cfg.get("new_page"):
+            self._check_new_page(i, b, "appendix.new_page", "Приложение")
         self.check_runs(b, "Заголовки")
 
     def check_section_heading(self, i, b):
         cfg = nk.prof(self.p, "headings.sections", {})
         self._heading_common(b, cfg, "headings.section")
-        if b.extra.get("level") in cfg.get("new_page_levels", []) and not nk.starts_new_page(self.doc, self.blocks, i):
-            self.add("headings.section.new_page", "Заголовки", "error", "auto",
-                     "Раздел (глава) начинается не с новой страницы.", b.where())
+        if b.extra.get("level") in cfg.get("new_page_levels", []):
+            self._check_new_page(i, b, "headings.section.new_page", "Глава (раздел)")
         if "first_line_indent_cm" in cfg:
             self._check_indent(b, cfg["first_line_indent_cm"], "headings.section.indent", "Заголовки")
         if cfg.get("number_trailing_dot") is False and re.match(r"^\d+(\.\d+)*\.\s", b.text.strip()):
@@ -329,11 +411,17 @@ class Audit:
         cfg = nk.prof(self.p, "figures" if kind == "figure" else "tables", {})
         m = nk.match_caption(b.text, kind)
         label, sep, title = m.group("label"), m.group("sep"), m.group("title")
-        if label != nk.CANON_LABEL[kind] or m.group("sp") != " " or sep != " — ":
-            expected = cfg.get("caption_format", "").replace("{n}", m.group("num")).replace(
-                "{title}", nk.excerpt(title.rstrip("."), 30))
+        sample = cfg.get("caption_format", "").replace("{n}", "1").replace("{title}", "Название")
+        if label != nk.CANON_LABEL[kind]:
             self.add(f"{kind}.caption_format", cat, "error", "auto",
-                     f"Подпись оформлена не по образцу «{expected}».", b.where())
+                     f"«{label}» вместо «{nk.CANON_LABEL[kind]}» (образец: «{sample}»).", b.where())
+        if m.group("sp") != " ":
+            self.add(f"{kind}.caption_format", cat, "error", "auto",
+                     f"Нет пробела между словом и номером (образец: «{sample}»).", b.where())
+        if sep != " — ":
+            marks = sep.strip() or "ничего"
+            self.add(f"{kind}.caption_format", cat, "error", "auto",
+                     f"Между номером и названием «{marks}» вместо тире «—» (образец: «{sample}»).", b.where())
         if cfg.get("caption_trailing_dot") is False and title.rstrip().endswith(".") \
                 and not re.search(r"\b\w{1,2}\.$", title.rstrip()):
             self.add(f"{kind}.caption_dot", cat, "error", "auto", "Точка в конце подписи.", b.where())
@@ -392,7 +480,7 @@ class Audit:
 
     def check_tables_have_captions(self):
         for i, b in enumerate(self.blocks):
-            if b.kind != "tbl":
+            if b.kind != "tbl" or b.role == "title":
                 continue
             before = nk.prev_block(self.blocks, i)
             if before is not None and before.kind == "p" and before.role == "caption_table":
@@ -402,6 +490,8 @@ class Audit:
             # подпись под таблицей уже отмечена в check_caption
             after = nk.next_block(self.blocks, i)
             if after is not None and after.kind == "p" and after.role == "caption_table":
+                continue
+            if is_layout_table(b):
                 continue
             first = next((x for x in self.blocks[i + 1:] if x.kind == "p" and x.in_table and x.text.strip()), None)
             where = f"таблица, начинается с «{nk.excerpt(first.text, 40)}»" if first else "таблица"
@@ -413,13 +503,22 @@ class Audit:
     def check_structure(self):
         present = {nk.normalize_heading(b.text) for b in self.blocks
                    if b.kind == "p" and b.role == "heading_struct"}
+        aliases = nk.prof(self.p, "headings.structural_elements.aliases", {}) or {}
         for must in nk.prof(self.p, "headings.structural_elements.required", []):
-            if nk.normalize_heading(must) not in present:
+            if nk.normalize_heading(must) in present:
+                continue
+            alt = next((a for a in aliases.get(must, []) if nk.normalize_heading(a) in present), None)
+            if alt:
+                self.add("structure.renamed", "Структура", "info", "author",
+                         f"Элемент «{must}» назван «{alt}». Стандарт перечисляет элементы, но не требует "
+                         "дословных заголовков; проверьте требования совета.")
+            else:
                 self.add("structure.missing", "Структура", "warning", "author",
                          f"Не найден структурный элемент «{must}» (или он назван иначе).")
         bib = nk.normalize_heading(nk.prof(self.p, "bibliography.heading", ""))
         aliases = {nk.normalize_heading(a) for a in nk.prof(self.p, "bibliography.heading_aliases", [])}
-        if bib and not (present & ({bib} | aliases)):
+        bib_alts = {nk.normalize_heading(a) for a in nk.prof(self.p, "bibliography.heading_aliases", [])}
+        if bib and not (present & ({bib} | bib_alts)):
             self.add("structure.no_bibliography", "Структура", "warning", "author",
                      "Не найден список использованных источников.")
         toc_heading = next((t for t in ("СОДЕРЖАНИЕ", "ОГЛАВЛЕНИЕ") if t in present), None)
@@ -439,20 +538,64 @@ class Audit:
                 nums.append((nk.match_caption(b.text, kind).group("num"), b))
         return nums
 
+    def _is_continuation(self, b, n, kind) -> bool:
+        word = "рисунк" if kind == "figure" else "таблиц"
+        i = self.blocks.index(b)
+        for x in self.blocks[max(0, i - 4):i]:
+            if x.kind == "p" and re.match(rf"^(окончание|продолжение)\s+{word}\w*\s+{re.escape(n)}\b",
+                                          x.text.strip(), re.I):
+                return True
+        return False
+
+    def _merged_caption_numbers(self, kind) -> list[str]:
+        """Подписи, слитые с соседним текстом через перенос строки, — номера тоже существуют."""
+        out = []
+        for b in self.blocks:
+            if b.kind != "p" or b.role.startswith("caption") or "\n" not in b.text:
+                continue
+            for line in b.text.split("\n")[1:]:
+                m = nk.match_caption(line, kind)
+                if m:
+                    out.append(m.group("num"))
+        return out
+
+    def check_merged_captions(self):
+        for b in self.blocks:
+            if b.kind != "p" or b.in_table or "\n" not in b.text:
+                continue
+            lines = b.text.split("\n")
+            for kind, cat in (("figure", "Рисунки"), ("table", "Таблицы")):
+                if any(nk.match_caption(line, kind) for line in lines[1:]):
+                    self.add(f"{kind}.caption_merged", cat, "error", "claude",
+                             "Подпись слита с соседним текстом через перенос строки (Shift+Enter), "
+                             "а не стоит отдельным абзацем: её не видят автоматические списки и выравнивание.",
+                             b.where())
+
     def check_cross_refs(self):
         body_text = "\n".join(b.text for b in self.blocks
-                              if b.kind == "p" and b.role in ("body", "list", "table_text"))
+                              if b.kind == "p" and b.role in ("body", "list", "table_text", "note"))
         for kind, role, cat, word, cfg_key in (
                 ("figure", "caption_figure", "Рисунки", r"рис(?:\.|ун(?:ок|ка|ке|ком|ки|ках|ков|кам|ками))", "figures"),
                 ("table", "caption_table", "Таблицы", r"табл(?:\.|иц(?:а|ы|е|у|ей|ах|ам|ами))", "tables")):
             caps = self._captions(role, kind)
             numbers = [n for n, _ in caps]
             seen = set()
+            continued = set()
             for n, b in caps:
                 if n in seen:
-                    self.add(f"{kind}.duplicate_number", cat, "error", "author",
-                             f"Номер {n} повторяется.", b.where())
+                    if self._is_continuation(b, n, kind):
+                        continued.add(id(b))
+                        if kind == "figure":
+                            self.add("figure.continuation", cat, "warning", "claude",
+                                     f"Рисунок {n} на нескольких листах: наименование повторено. По ГОСТ Р 2.105-2019, "
+                                     f"п. 6.9.7 — «Рисунок {n} — Название (лист 1 из 2)», далее «Рисунок {n} (лист 2 из 2)»; "
+                                     "слова «Окончание рисунка» не нужны.", b.where())
+                    else:
+                        self.add(f"{kind}.duplicate_number", cat, "error", "author",
+                                 f"Номер {n} повторяется.", b.where())
                 seen.add(n)
+            numbers = [n for n, b in caps if id(b) not in continued]
+            numbers += self._merged_caption_numbers(kind)
             plain = [int(n) for n in numbers if n.isdigit()]
             if plain and plain != list(range(1, len(plain) + 1)) and len(plain) == len(numbers):
                 self.add(f"{kind}.numbering_order", cat, "warning", "author",
@@ -475,17 +618,10 @@ class Audit:
         entries = [b for b in self.blocks if b.kind == "p" and b.role == "bib_entry" and b.text.strip()]
         if not entries:
             return
-        text = "\n".join(b.text for b in self.blocks if b.kind == "p" and b.role in ("body", "list", "table_text",
-                                                                                      "caption_figure", "caption_table"))
+        text = "\n".join(b.text for b in self.blocks if b.kind == "p" and b.role in (
+            "body", "list", "table_text", "note", "caption_figure", "caption_table", "formula"))
         cited: list[int] = []
-        for m in re.finditer(r"\[([\d,\s–—\-;]+)(?:,\s*с\.\s*[\d–—\-]+)?\]", text):
-            for part in re.split(r"[,;]", m.group(1)):
-                part = part.strip()
-                rng = re.match(r"^(\d+)\s*[–—\-]\s*(\d+)$", part)
-                if rng:
-                    cited += list(range(int(rng.group(1)), int(rng.group(2)) + 1))
-                elif part.isdigit():
-                    cited.append(int(part))
+        cited = parse_citations(text)
         n = len(entries)
         fmt = nk.prof(self.p, "bibliography.entry_number")
         if fmt:
@@ -495,6 +631,8 @@ class Audit:
                 if m and bool(m.group(2)) != need_dot:
                     self.add("bibliography.entry_number", "Ссылки и источники", "error", "auto",
                              f"Номер записи нужен в виде «{fmt.replace('{n}', m.group(1))}».", b.where())
+        if nk.prof(self.p, "bibliography.citations_required") is False:
+            cited = []
         if cited:
             over = sorted({c for c in cited if c > n or c < 1})
             if over:
@@ -510,7 +648,7 @@ class Audit:
                 if first_seen != sorted(first_seen):
                     self.add("bibliography.order", "Ссылки и источники", "warning", "claude",
                              "Источники в списке расположены не в порядке первого упоминания в тексте.")
-        else:
+        elif nk.prof(self.p, "bibliography.citations_required") is not False:
             self.add("bibliography.no_refs", "Ссылки и источники", "warning", "author",
                      "В тексте не найдено ссылок вида [1] на источники.")
         self.add("bibliography.review", "Ссылки и источники", "info", "claude",

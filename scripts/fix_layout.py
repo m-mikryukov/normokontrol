@@ -54,6 +54,8 @@ class Fixer:
                 self.fix_runs(b)
                 if role == "bib_entry":
                     self.fix_bib_number(b)
+            elif role == "note":
+                self.fix_runs(b, size_min=None)
             elif role == "heading_struct":
                 self.fix_struct_heading(i, b)
             elif role == "heading_appendix":

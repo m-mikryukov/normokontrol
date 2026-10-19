@@ -126,10 +126,25 @@ def para_text(p_el) -> str:
     return "".join(run_text(r) for r in visible_runs(p_el))
 
 
+_PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+_WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+_LINE_GEOMS = {"line", "straightConnector1", "bentConnector2", "bentConnector3", "curvedConnector3"}
+
+
 def has_drawing(p_el) -> bool:
-    for tag in ("w:drawing", "w:pict", "w:object"):
-        for el in p_el.iter(qn(tag)):
-            # картинка внутри надписи не делает абзац рисунком
+    """Есть ли в абзаце иллюстрация: картинка, диаграмма, схема из фигур.
+
+    Одиночные линии (поля для ответа в анкете, подчёркивания) иллюстрацией не считаем.
+    """
+    for _ in p_el.iter(f"{{{_PIC_NS}}}pic", "{urn:schemas-microsoft-com:vml}imagedata", qn("w:object")):
+        return True
+    for gd in p_el.iter(f"{{{A_NS}}}graphicData"):
+        uri = gd.get("uri") or ""
+        if "chart" in uri or "diagram" in uri:
+            return True
+    for wsp in p_el.iter(f"{{{_WPS_NS}}}wsp"):
+        geom = wsp.find(f".//{{{A_NS}}}prstGeom")
+        if geom is None or geom.get("prst") not in _LINE_GEOMS:
             return True
     return False
 
@@ -475,9 +490,11 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
 
     Роли: title, toc, empty, figure, formula, caption_figure, caption_table,
     heading_struct, heading_appendix, appendix_title, heading_section,
-    list, bib_entry, table_text, body.
+    note, continuation, caption_tail, list, bib_entry, table_text, body.
     """
     names = {normalize_heading(n) for n in prof(profile, "headings.structural_elements.names", [])}
+    for alts in (prof(profile, "headings.structural_elements.aliases", {}) or {}).values():
+        names |= {normalize_heading(a) for a in alts}
     appendix_word = (prof(profile, "appendices.heading_word") or "ПРИЛОЖЕНИЕ").upper()
     bib_heading = normalize_heading(prof(profile, "bibliography.heading", ""))
     bib_aliases = {normalize_heading(a) for a in prof(profile, "bibliography.heading_aliases", [])}
@@ -486,18 +503,37 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
     paras = [b for b in blocks if b.kind == "p"]
 
     def is_struct(b: Block) -> bool:
-        if b.in_table or b.in_toc_sdt:
+        if b.in_table:
             return False
         t = normalize_heading(b.text)
+        if b.in_toc_sdt:  # Word кладёт заголовок «Оглавление» внутрь элемента автособираемого оглавления
+            return t in toc_names
         return bool(t) and (t in names or t in bib_aliases or t == bib_heading or t in toc_names)
 
     def is_appendix(b: Block) -> bool:
-        if b.in_table or b.in_toc_sdt:
+        if b.in_table or b.in_toc_sdt or len(b.text) > 300:
             return False
         t = normalize_heading(b.text)
-        return bool(re.match(rf"^{appendix_word}(\s+[А-ЯA-Z0-9]{{1,2}})?$", t))
+        if re.match(rf"^{appendix_word}(\s+[А-ЯA-Z0-9]{{1,2}})?$", t):
+            return True
+        # «Приложение А. Название» в одну строку
+        if re.match(rf"^{appendix_word}\s+[А-ЯA-Z0-9]{{1,2}}\s*[.:—–-]\s*\S", t):
+            b.extra["inline_title"] = True
+            return True
+        return False
+
+    chapter_word = any(re.match(r"^(глава|раздел)\s+\d+", b.text.strip(), re.I) and heading_level(doc, b.obj)
+                       for b in paras)
 
     first_struct = next((i for i, b in enumerate(paras) if is_struct(b) or is_appendix(b)), None)
+
+    if first_struct is not None:  # таблицы на титуле и обороте обложки — вёрстка, а не таблицы
+        first_el = paras[first_struct].el
+        for b in blocks:
+            if b.el is first_el:
+                break
+            if b.kind == "tbl":
+                b.role = "title"
 
     state = "start" if first_struct else "body"
     appendix_tail = 0
@@ -517,7 +553,7 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
             continue
         if is_appendix(b):
             b.role = "heading_appendix"
-            state, appendix_tail = "body", 2
+            state, appendix_tail = "body", (0 if b.extra.get("inline_title") else 2)
             continue
         if b.in_toc_sdt or style.startswith("toc") or "оглавление" in style or style.startswith("содержание"):
             b.role = "toc"
@@ -539,6 +575,9 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
         if has_math(b.el) and len(re.sub(r"[\s()\d.,]", "", t)) < 3:
             b.role = "formula"
             continue
+        if re.match(r"^(продолжение|окончание)\s+(таблиц|рисунк)\w*\s+\S+", t, re.I) and len(t) < 60:
+            b.role = "continuation"
+            continue
         if match_caption(t, "figure") and not b.in_table:
             b.role = "caption_figure"
             continue
@@ -548,9 +587,17 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
         if b.in_table:
             b.role = "table_text"
             continue
+        prev = paras[i - 1] if i else None
+        if prev is not None and prev.role in ("caption_figure", "caption_table") and t[:1].islower() \
+                and len(t) < 200 and not heading_lvl:
+            b.role = "caption_tail"  # подпись разбита клавишей Enter
+            continue
         if heading_lvl:
             b.role = "heading_section"
-            b.extra["level"] = heading_lvl
+            b.extra["level"] = logical_level(b, heading_lvl, chapter_word)
+            continue
+        if re.match(r"^(примечани[ея]|источник)\s*[:.—–-]", t, re.I):
+            b.role = "note"
             continue
         if state == "bib":
             b.role = "bib_entry"
@@ -559,6 +606,41 @@ def classify(doc, blocks: list[Block], profile: dict) -> None:
             b.role = "list"
             continue
         b.role = "body"
+
+
+def logical_level(b: Block, style_level: int, chapter_word: bool) -> int:
+    """Уровень заголовка по смыслу, а не по стилю.
+
+    Авторы часто ставят «Заголовок 1» и главам, и параграфам. Уровень берём из
+    текста: «Глава 2» — 1, «2.3 …» — 2; при автонумерации — из уровня списка.
+    Если главы обозначены словом «Глава», остальные заголовки того же стиля
+    («Выводы по главе») считаем вложенными.
+    """
+    t = b.text.strip()
+    if re.match(r"^(глава|раздел)\s+\d+", t, re.I):
+        return 1
+    m = re.match(r"^(\d+(?:\.\d+)*)\.?\s", t)
+    if m:
+        return m.group(1).count(".") + 1
+    pPr = b.el.find(qn("w:pPr"))
+    num = None if pPr is None else pPr.find(qn("w:numPr"))
+    ilvl = None if num is None else num.find(qn("w:ilvl"))
+    if ilvl is not None:
+        return int(ilvl.get(qn("w:val"))) + 1
+    if chapter_word:
+        return max(style_level, 2)
+    return style_level
+
+
+def rendered_break_before(b: Block) -> bool:
+    """Word при последней вёрстке начал абзац с новой страницы (w:lastRenderedPageBreak)."""
+    for r in visible_runs(b.el):
+        for child in r:
+            if child.tag == qn("w:lastRenderedPageBreak"):
+                return True
+            if child.tag == qn("w:t") and (child.text or "").strip():
+                return False
+    return False
 
 
 def prev_block(blocks: list[Block], i: int):
