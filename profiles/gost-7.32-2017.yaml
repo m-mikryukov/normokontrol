@@ -1,0 +1,62 @@
+# Базовый профиль: ГОСТ 7.32-2017
+# «Отчёт о научно-исследовательской работе. Структура и правила оформления».
+# Значения сверить с текстом стандарта перед первым релизом.
+
+name: ГОСТ 7.32-2017
+id: gost-7.32-2017
+
+page:
+  size: A4
+  margins_mm:
+    left: 30
+    right: 15
+    top: 20
+    bottom: 20
+
+text:
+  font: Times New Roman
+  size_pt_min: 12        # ГОСТ задаёт минимум; вузы обычно требуют 14
+  color: black
+  line_spacing: 1.5
+  first_line_indent_cm: 1.25
+  alignment: justify
+
+page_numbers:
+  style: arabic
+  position: bottom_center
+  trailing_dot: false
+  title_page_counted: true
+  title_page_shown: false
+
+headings:
+  structural_elements:   # РЕФЕРАТ, СОДЕРЖАНИЕ, ВВЕДЕНИЕ, ЗАКЛЮЧЕНИЕ и т. д.
+    case: upper
+    alignment: center
+    bold: true
+    trailing_dot: false
+    new_page: true
+  sections:
+    alignment: left
+    first_line_indent_cm: 1.25
+    bold: true
+    trailing_dot: false
+    numbering: arabic    # 1, 1.1, 1.1.1
+
+figures:
+  caption_position: below
+  caption_alignment: center
+  caption_format: "Рисунок {n} — {title}"
+
+tables:
+  caption_position: above
+  caption_alignment: left
+  caption_format: "Таблица {n} — {title}"
+
+formulas:
+  numbering: "({n})"
+  number_alignment: right
+
+bibliography:
+  heading: СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ
+  standard: ГОСТ Р 7.0.100-2018
+  order: by_citation     # TODO: сверить, допускается ли алфавитный порядок
