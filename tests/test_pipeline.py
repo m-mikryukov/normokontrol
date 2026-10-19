@@ -120,3 +120,75 @@ def test_libreoffice_opens_result(sample, tmp_path):
     subprocess.run([str(ROOT / "scripts" / "render_check.sh"), str(out), str(tmp_path / "render")],
                    check=True, capture_output=True, timeout=180)
     assert (tmp_path / "render" / "fixed.pdf").stat().st_size > 1000
+
+
+# ---------------------------------------------------------------- профили по типам документов
+
+from make_sample import build_dissertation  # noqa: E402
+import catalog  # noqa: E402
+
+
+def audit_with(path, profile_id):
+    return Audit(nk.open_docx(path), nk.load_profile(profile_id)).run()
+
+
+def fix_with(src, dst, profile_id):
+    doc = nk.open_docx(src)
+    Fixer(doc, nk.load_profile(profile_id)).run()
+    doc.save(dst)
+
+
+def test_catalog_is_consistent():
+    assert catalog.check(catalog.load_catalog()) == []
+
+
+def test_every_document_type_has_profile_or_is_planned():
+    cat = catalog.load_catalog()
+    for key, e in cat["document_types"].items():
+        assert e.get("profile") or e.get("readiness") == "planned", key
+
+
+def test_dissertation_profile(tmp_path):
+    src, out = tmp_path / "diss.docx", tmp_path / "diss_fixed.docx"
+    build_dissertation(str(src))
+    pid = "gost-r-7.0.11-2011-dissertation"
+    found = rules(audit_with(src, pid))
+    for rule in ("page.margins", "page_numbers.missing", "text.size_max", "text.indent",
+                 "headings.section.new_page", "headings.section.alignment", "headings.struct.new_page"):
+        assert rule in found, rule
+    # ГОСТ Р 7.0.11 не задаёт гарнитуру и регистр — такие правила не проверяем
+    assert not {"text.font", "headings.struct.case", "headings.struct.bold"} & found
+    fix_with(src, out, pid)
+    assert rules(audit_with(out, pid), "auto") == set()
+    # номер страницы — в верхнем колонтитуле
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    doc = nk.open_docx(out)
+    headers = [r.target_part.element for r in doc.part.rels.values() if r.reltype == RT.HEADER]
+    assert any("PAGE" in (t.text or "") for h in headers for t in h.iter(qn("w:instrText")))
+
+
+def test_student_profile_does_not_require_nir_elements(sample):
+    missing = [f.message for f in audit_with(sample, "student-work-gost-7.32-2017") if f.rule == "structure.missing"]
+    assert not any("ИСПОЛНИТЕЛЕЙ" in m or "РЕФЕРАТ" in m for m in missing)
+    nir = [f.message for f in audit_with(sample, "gost-7.32-2017") if f.rule == "structure.missing"]
+    assert any("РЕФЕРАТ" in m for m in nir)
+
+
+def test_null_unsets_inherited_rule(tmp_path):
+    (tmp_path / "x.yaml").write_text("id: x\nextends: gost-7.32-2017\ntext:\n  font: null\n", encoding="utf-8")
+    p = nk.load_profile(str(tmp_path / "x.yaml"))
+    assert "font" not in p["text"] and p["text"]["size_pt_min"] == 12
+
+
+def test_page_break_after_heading_text_is_not_before(tmp_path):
+    from docx import Document
+    from docx.enum.text import WD_BREAK
+
+    doc = Document()
+    doc.add_paragraph("Текст")
+    doc.add_paragraph("ВВЕДЕНИЕ").runs[0].add_break(WD_BREAK.PAGE)
+    blocks = nk.iter_blocks(doc)
+    assert not nk.starts_new_page(doc, blocks, 1)
+    doc.add_paragraph("ЗАКЛЮЧЕНИЕ")
+    blocks = nk.iter_blocks(doc)
+    assert nk.starts_new_page(doc, blocks, 2)

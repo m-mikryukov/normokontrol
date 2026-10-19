@@ -25,7 +25,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt, RGBColor
 
 import nk_common as nk
-from audit import ALIGN
+from audit import ALIGN, caption_spacing_ok
 from nk_tracked import Revisions, ensure_change_last
 
 
@@ -52,12 +52,14 @@ class Fixer:
             if role in ("body", "list", "bib_entry"):
                 self.fix_text_para(b, indent=(role == "body"))
                 self.fix_runs(b)
+                if role == "bib_entry":
+                    self.fix_bib_number(b)
             elif role == "heading_struct":
                 self.fix_struct_heading(i, b)
             elif role == "heading_appendix":
                 self.fix_appendix_heading(i, b)
             elif role == "heading_section":
-                self.fix_section_heading(b)
+                self.fix_section_heading(i, b)
             elif role in ("caption_figure", "caption_table"):
                 self.fix_caption(b, "figure" if role == "caption_figure" else "table")
             elif role == "figure":
@@ -105,7 +107,8 @@ class Fixer:
         found = probe._page_field_paragraphs()
         if not found:
             s = self.doc.sections[0]
-            footer = s.footer
+            top = cfg.get("position", "").startswith("top")
+            footer = s.header if top else s.footer
             footer.is_linked_to_previous = False
             par = footer.paragraphs[0] if footer.paragraphs and not footer.paragraphs[0].text.strip() \
                 else footer.add_paragraph()
@@ -131,7 +134,7 @@ class Fixer:
                 runs.append(r)
             self._font_on_new_runs(runs)
             self.rev.wrap_inserted(runs)
-            self.note("номер страницы в нижнем колонтитуле")
+            self.note("номер страницы в верхнем колонтитуле" if top else "номер страницы в нижнем колонтитуле")
         else:
             for in_footer, p_el in found:
                 jc = p_el.find(f"{qn('w:pPr')}/{qn('w:jc')}")
@@ -167,11 +170,12 @@ class Fixer:
             b.obj.paragraph_format.alignment = need
             self.note(label)
 
-    def _set_indent(self, b, cm: float, label: str):
+    def _set_indent(self, b, cm, label: str):
+        lo, hi = nk.indent_range(cm)
         ind = nk.eff_para(self.doc, b.obj, "first_line_indent")
         have = 0.0 if ind is None else ind.cm
-        if abs(have - cm) > 0.05:
-            b.obj.paragraph_format.first_line_indent = Cm(cm)
+        if have < lo - 0.05 or have > hi + 0.05:
+            b.obj.paragraph_format.first_line_indent = Cm(lo)
             self.note(label)
 
     def fix_text_para(self, b, indent=True):
@@ -190,6 +194,7 @@ class Fixer:
     def fix_runs(self, b, size_min="profile", bold=None, caps=False):
         t = self.p.get("text", {})
         font = t.get("font")
+        size_max = t.get("size_pt_max") if size_min == "profile" and b.role in ("body", "list", "bib_entry") else None
         if size_min == "profile":
             size_min = t.get("size_pt_min")
         for r in nk.text_runs(b):
@@ -210,6 +215,14 @@ class Fixer:
                         szcs = OxmlElement("w:szCs")
                         rpr.find(qn("w:sz")).addnext(szcs)
                     szcs.set(qn("w:val"), str(int(size_min * 2)))
+                    self.note("кегль")
+                if size_max and self.fonts.size_pt(r, b.obj) > size_max:
+                    rpr.get_or_add_sz().val = Pt(size_max)
+                    szcs = rpr.find(qn("w:szCs"))
+                    if szcs is None:
+                        szcs = OxmlElement("w:szCs")
+                        rpr.find(qn("w:sz")).addnext(szcs)
+                    szcs.set(qn("w:val"), str(int(size_max * 2)))
                     self.note("кегль")
                 if t.get("color") == "black" and not nk.is_black(self.fonts.color(r, b.obj)):
                     c = rpr.get_or_add_color()
@@ -263,9 +276,11 @@ class Fixer:
                 self._ensure_new_page(i, b, "приложение с новой страницы")
         self.fix_runs(b)
 
-    def fix_section_heading(self, b):
+    def fix_section_heading(self, i, b):
         cfg = nk.prof(self.p, "headings.sections", {})
         with self.rev.para(b.obj):
+            if b.extra.get("level") in cfg.get("new_page_levels", []):
+                self._ensure_new_page(i, b, "глава (раздел) с новой страницы")
             if "alignment" in cfg:
                 self._set_align(b, cfg["alignment"], "выравнивание заголовка")
             if "first_line_indent_cm" in cfg:
@@ -290,6 +305,9 @@ class Fixer:
                 self._set_align(b, cfg["caption_alignment"], "выравнивание подписи")
             if "caption_first_line_indent_cm" in cfg:
                 self._set_indent(b, cfg["caption_first_line_indent_cm"], "отступ подписи")
+            if "caption_line_spacing" in cfg and not caption_spacing_ok(self.doc, b, cfg["caption_line_spacing"]):
+                b.obj.paragraph_format.line_spacing = cfg["caption_line_spacing"]
+                self.note("интервал в подписи")
         self.fix_runs(b)
 
         # текст подписи: правим справа налево, чтобы смещения не поехали
@@ -325,6 +343,21 @@ class Fixer:
             if ind is not None and abs(ind.cm) > 0.05:
                 b.obj.paragraph_format.first_line_indent = Cm(0)
                 self.note("отступ у рисунка")
+
+    def fix_bib_number(self, b):
+        fmt = nk.prof(self.p, "bibliography.entry_number")
+        if not fmt:
+            return
+        m = re.match(r"^\s*(\d+)(\.?)\s", b.text)
+        if not m or bool(m.group(2)) == fmt.endswith("."):
+            return
+        pos = m.end(1)
+        ok = self.rev.replace_span(b.el, pos, pos, ".") if fmt.endswith(".") else \
+            self.rev.replace_span(b.el, pos, pos + 1, "")
+        if ok:
+            self.note("номер записи в списке источников")
+        else:
+            self.skipped.append(f"{b.where()}: номер записи поправить вручную")
 
     # ------------------------------------------------------------ итог
 

@@ -47,14 +47,35 @@ def _find_profile(name: str, near: Path | None = None) -> Path:
     raise FileNotFoundError(f"Профиль не найден: {name}")
 
 
-def load_profile(name: str, near: Path | None = None) -> dict:
-    """Загружает профиль и применяет наследование через `extends`."""
+def _drop_none(node):
+    if isinstance(node, dict):
+        return {k: _drop_none(v) for k, v in node.items() if v is not None}
+    return node
+
+
+def _load_raw(name: str, near: Path | None = None) -> dict:
     path = _find_profile(name, near)
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     parent = data.pop("extends", None)
     if parent:
-        data = _merge(load_profile(parent, path.parent), data)
+        data = _merge(_load_raw(parent, path.parent), data)
     return data
+
+
+def load_profile(name: str, near: Path | None = None) -> dict:
+    """Загружает профиль и применяет наследование через `extends`.
+
+    Значение `null` означает «правило не задано»: так профиль-наследник
+    отменяет требование базового, которого нет в его стандарте.
+    """
+    return _drop_none(_load_raw(name, near))
+
+
+def indent_range(value) -> tuple[float, float]:
+    """Отступ в профиле — число (1.25) или диапазон ([1.25, 1.7]); первое значение — целевое."""
+    if isinstance(value, (list, tuple)):
+        return float(value[0]), float(value[-1])
+    return float(value), float(value)
 
 
 def prof(profile: dict, dotted: str, default=None):
@@ -117,12 +138,31 @@ def has_math(p_el) -> bool:
     return any(True for _ in p_el.iter(f"{{{M_NS}}}oMath"))
 
 
+def _break_positions(p_el):
+    """(разрыв до текста, разрыв после текста) — по ручным разрывам страницы в абзаце."""
+    before = after = False
+    seen_text = False
+    for r in visible_runs(p_el):
+        for child in r:
+            if child.tag == qn("w:br") and child.get(qn("w:type")) == "page":
+                if seen_text:
+                    after = True
+                else:
+                    before = True
+            elif child.tag == qn("w:t") and (child.text or "").strip():
+                seen_text = True
+                after = False
+    return before, after
+
+
 def has_page_break(p_el) -> bool:
-    for br in p_el.iter(qn("w:br")):
-        if br.get(qn("w:type")) == "page":
-            return True
+    """Заканчивается ли абзац разрывом страницы (ручным или разрывом раздела)."""
     pPr = p_el.find(qn("w:pPr"))
-    return pPr is not None and pPr.find(qn("w:sectPr")) is not None
+    if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+        return True
+    before, after = _break_positions(p_el)
+    has_text = bool(para_text(p_el).strip())
+    return after or (before and not has_text)
 
 
 def excerpt(text: str, n: int = 50) -> str:
@@ -551,8 +591,7 @@ def starts_new_page(doc, blocks: list[Block], i: int) -> bool:
     b = blocks[i]
     if eff_para(doc, b.obj, "page_break_before"):
         return True
-    runs = visible_runs(b.el)
-    if runs and any(br.get(qn("w:type")) == "page" for br in runs[0].iter(qn("w:br"))):
+    if _break_positions(b.el)[0]:
         return True
     j = i - 1
     while j >= 0:

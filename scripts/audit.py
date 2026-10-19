@@ -35,6 +35,13 @@ ALIGN_RU = {WD_ALIGN_PARAGRAPH.JUSTIFY: "по ширине", WD_ALIGN_PARAGRAPH.
 A4 = (210.0, 297.0)
 
 
+def caption_spacing_ok(doc, b, need: float) -> bool:
+    ls = nk.eff_para(doc, b.obj, "line_spacing")
+    if ls is None:  # не задан нигде — в Word это одинарный
+        ls = 1.0
+    return isinstance(ls, float) and abs(ls - need) <= 0.01
+
+
 @dataclass
 class Finding:
     rule: str
@@ -76,7 +83,7 @@ class Audit:
             elif role == "heading_appendix":
                 self.check_appendix_heading(i, b)
             elif role == "heading_section":
-                self.check_section_heading(b)
+                self.check_section_heading(i, b)
             elif role == "caption_figure":
                 self.check_caption(i, b, "figure")
             elif role == "caption_table":
@@ -140,14 +147,18 @@ class Audit:
             return
         found = self._page_field_paragraphs()
         if not found:
+            where = "верхнем" if cfg.get("position", "").startswith("top") else "нижнем"
             self.add("page_numbers.missing", "Нумерация страниц", "error", "auto",
-                     "В колонтитулах нет поля номера страницы.")
+                     f"Нет номера страницы (нужен в {where} колонтитуле).")
             return
         pos = cfg.get("position", "bottom_center")
         for in_footer, p_el in found:
             if pos.startswith("bottom") and not in_footer:
                 self.add("page_numbers.position", "Нумерация страниц", "error", "claude",
                          "Номер страницы в верхнем колонтитуле, нужен в нижнем.")
+            if pos.startswith("top") and in_footer:
+                self.add("page_numbers.position", "Нумерация страниц", "error", "claude",
+                         "Номер страницы в нижнем колонтитуле, нужен в верхнем.")
             jc = p_el.find(f"{nk.qn('w:pPr')}/{nk.qn('w:jc')}")
             jc_val = None if jc is None else jc.get(nk.qn("w:val"))
             if pos.endswith("center") and jc_val != "center" and "\t" not in nk.para_text(p_el):
@@ -196,17 +207,20 @@ class Audit:
             self._check_indent(b, t["first_line_indent_cm"], "text.indent", "Основной текст")
 
     def _check_indent(self, b, need_cm, rule, category, fix="auto"):
+        lo, hi = nk.indent_range(need_cm)
         ind = nk.eff_para(self.doc, b.obj, "first_line_indent")
         have = 0.0 if ind is None else ind.cm
-        if abs(have - need_cm) > 0.05:
+        if have < lo - 0.05 or have > hi + 0.05:
+            need = f"{lo:g} см" if lo == hi else f"от {lo:g} до {hi:g} см"
             self.add(rule, category, "error", fix,
-                     f"Абзацный отступ {have:.2f} см, нужен {need_cm} см.", b.where())
+                     f"Абзацный отступ {have:.2f} см, нужен {need}.", b.where())
 
     def check_runs(self, b: nk.Block, category: str, size=True, size_min=None):
         t = self.p.get("text", {})
         font = t.get("font")
         size_min = size_min if size_min is not None else (t.get("size_pt_min") if size else None)
-        bad_fonts, bad_sizes, colored = set(), set(), False
+        size_max = t.get("size_pt_max") if size and category == "Основной текст" else None
+        bad_fonts, bad_sizes, big_sizes, colored = set(), set(), set(), False
         for r in nk.text_runs(b):
             if font:
                 f = self.fonts.font(r, b.obj)
@@ -218,6 +232,8 @@ class Audit:
                 vert = r.find(f"{nk.qn('w:rPr')}/{nk.qn('w:vertAlign')}")
                 if sz < size_min and vert is None:
                     bad_sizes.add(sz)
+            if size_max and self.fonts.size_pt(r, b.obj) > size_max:
+                big_sizes.add(self.fonts.size_pt(r, b.obj))
             if t.get("color") == "black" and not nk.is_black(self.fonts.color(r, b.obj)):
                 colored = True
         if bad_fonts:
@@ -226,6 +242,10 @@ class Audit:
         if bad_sizes:
             self.add("text.size", category, "error", "auto",
                      f"Кегль {', '.join(f'{s:g}' for s in sorted(bad_sizes))} пт, нужно не меньше {size_min} пт.",
+                     b.where())
+        if big_sizes:
+            self.add("text.size_max", category, "error", "auto",
+                     f"Кегль {', '.join(f'{s:g}' for s in sorted(big_sizes))} пт, нужно не больше {size_max} пт.",
                      b.where())
         if colored:
             self.add("text.color", category, "error", "auto", "Цветной текст, нужен чёрный.", b.where())
@@ -290,9 +310,12 @@ class Audit:
                      "Приложение начинается не с новой страницы.", b.where())
         self.check_runs(b, "Заголовки")
 
-    def check_section_heading(self, b):
+    def check_section_heading(self, i, b):
         cfg = nk.prof(self.p, "headings.sections", {})
         self._heading_common(b, cfg, "headings.section")
+        if b.extra.get("level") in cfg.get("new_page_levels", []) and not nk.starts_new_page(self.doc, self.blocks, i):
+            self.add("headings.section.new_page", "Заголовки", "error", "auto",
+                     "Раздел (глава) начинается не с новой страницы.", b.where())
         if "first_line_indent_cm" in cfg:
             self._check_indent(b, cfg["first_line_indent_cm"], "headings.section.indent", "Заголовки")
         if cfg.get("number_trailing_dot") is False and re.match(r"^\d+(\.\d+)*\.\s", b.text.strip()):
@@ -322,6 +345,10 @@ class Audit:
                          f"Подпись выровнена {ALIGN_RU.get(al, al)}, нужно {ALIGN_RU[need]}.", b.where())
         if "caption_first_line_indent_cm" in cfg:
             self._check_indent(b, cfg["caption_first_line_indent_cm"], f"{kind}.caption_indent", cat)
+        if "caption_line_spacing" in cfg:
+            if not caption_spacing_ok(self.doc, b, cfg["caption_line_spacing"]):
+                self.add(f"{kind}.caption_spacing", cat, "error", "auto",
+                         f"Межстрочный интервал подписи должен быть {cfg['caption_line_spacing']:g}.", b.where())
         self.check_runs(b, cat)
         # положение подписи
         if kind == "figure":
@@ -386,9 +413,8 @@ class Audit:
     def check_structure(self):
         present = {nk.normalize_heading(b.text) for b in self.blocks
                    if b.kind == "p" and b.role == "heading_struct"}
-        for must in ("ВВЕДЕНИЕ", "ЗАКЛЮЧЕНИЕ"):
-            if must in {nk.normalize_heading(n) for n in
-                        nk.prof(self.p, "headings.structural_elements.names", [])} and must not in present:
+        for must in nk.prof(self.p, "headings.structural_elements.required", []):
+            if nk.normalize_heading(must) not in present:
                 self.add("structure.missing", "Структура", "warning", "author",
                          f"Не найден структурный элемент «{must}» (или он назван иначе).")
         bib = nk.normalize_heading(nk.prof(self.p, "bibliography.heading", ""))
@@ -396,13 +422,15 @@ class Audit:
         if bib and not (present & ({bib} | aliases)):
             self.add("structure.no_bibliography", "Структура", "warning", "author",
                      "Не найден список использованных источников.")
-        if "СОДЕРЖАНИЕ" in present and not any(b.kind == "p" and b.role == "toc" for b in self.blocks):
-            self.add("structure.empty_toc", "Структура", "warning", "claude", "После «СОДЕРЖАНИЕ» нет оглавления.")
+        toc_heading = next((t for t in ("СОДЕРЖАНИЕ", "ОГЛАВЛЕНИЕ") if t in present), None)
+        if toc_heading and not any(b.kind == "p" and b.role == "toc" for b in self.blocks):
+            self.add("structure.empty_toc", "Структура", "warning", "claude", f"После «{toc_heading}» нет перечня разделов.")
         has_auto_toc = any(b.kind == "p" and b.in_toc_sdt for b in self.blocks) or \
             any("TOC" in (t.text or "") for t in self.doc.element.body.iter(nk.qn("w:instrText")))
-        if "СОДЕРЖАНИЕ" in present and not has_auto_toc:
+        if toc_heading and not has_auto_toc:
             self.add("structure.manual_toc", "Структура", "info", "claude",
-                     "Содержание набрано вручную: номера страниц могут не совпасть. Лучше собрать автоматически.")
+                     f"«{toc_heading.capitalize()}» набрано вручную: номера страниц могут не совпасть. "
+                     "Лучше собрать автоматически.")
 
     def _captions(self, role, kind):
         nums = []
@@ -459,6 +487,14 @@ class Audit:
                 elif part.isdigit():
                     cited.append(int(part))
         n = len(entries)
+        fmt = nk.prof(self.p, "bibliography.entry_number")
+        if fmt:
+            need_dot = fmt.endswith(".")
+            for b in entries:
+                m = re.match(r"^\s*(\d+)(\.?)\s", b.text)
+                if m and bool(m.group(2)) != need_dot:
+                    self.add("bibliography.entry_number", "Ссылки и источники", "error", "auto",
+                             f"Номер записи нужен в виде «{fmt.replace('{n}', m.group(1))}».", b.where())
         if cited:
             over = sorted({c for c in cited if c > n or c < 1})
             if over:
@@ -483,6 +519,25 @@ class Audit:
 
 
 # ---------------------------------------------------------------- отчёт
+
+
+def standards_lines(profile: dict) -> list[str]:
+    """Строки «по каким стандартам проверяли» со статусом из каталога."""
+    try:
+        import yaml
+
+        cat = yaml.safe_load((nk.PROFILES_DIR / "catalog.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for sid in profile.get("standards", []):
+        st = cat.get("standards", {}).get(sid)
+        if st:
+            out.append(f"- {st['title']} — {' '.join(st['status'].split())} (проверено {st['checked']}).")
+    if profile.get("readiness") in ("beta", "limited"):
+        out.append("- Профиль в статусе «" + {"beta": "бета", "limited": "частично"}[profile["readiness"]]
+                   + "»: часть требований проверяется только вручную.")
+    return (["Стандарты:"] + out + [""]) if out else []
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -511,9 +566,10 @@ def render_markdown(findings: list[Finding], path: str, profile: dict, max_place
     by_fix = {k: len({key for key in grouped if key[2] == k}) for k in FIXERS}
     lines = [f"# Нормоконтроль: {path}", "",
              f"Профиль: {profile.get('name', '?')}.",
+             *standards_lines(profile),
              f"Найдено: {plural(errors, 'ошибка', 'ошибки', 'ошибок')}, "
              f"{plural(warnings, 'предупреждение', 'предупреждения', 'предупреждений')} "
-             f"({plural(len(grouped), 'вид', 'вида', 'видов')} нарушений). "
+             f"— {plural(len(grouped), 'пункт', 'пункта', 'пунктов')} в отчёте. "
              f"Исправит скрипт — {by_fix['auto']}, смысловая правка — {by_fix['claude']}, "
              f"на автора — {by_fix['author']}.", ""]
     for cat in CATEGORIES:

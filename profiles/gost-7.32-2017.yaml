@@ -1,30 +1,33 @@
 # Базовый профиль: ГОСТ 7.32-2017
 # «Отчёт о научно-исследовательской работе. Структура и правила оформления».
-# Значения сверить с текстом стандарта перед первым релизом.
-# Ссылки на пункты — в references/gost-7.32-2017.md.
+# Пункты сверены с текстом стандарта (редакция с поправками), см. references/gost-7.32-2017.md.
+# null у ключа означает «правило не задано» — так наследник отменяет требование.
 
-name: ГОСТ 7.32-2017
+name: ГОСТ 7.32-2017 — отчёт о НИР
 id: gost-7.32-2017
+document_types: [nir_report]
+standards: [gost-7.32-2017, gost-r-7.0.100-2018, gost-r-7.0.5-2008]
+readiness: ready
 
 page:
-  size: A4
-  margins_mm:
+  size: A4                 # п. 6.1.1
+  margins_mm:              # п. 6.1.1
     left: 30
     right: 15
     top: 20
     bottom: 20
   tolerance_mm: 0.5
 
-text:
-  font: Times New Roman
-  size_pt_min: 12        # ГОСТ задаёт минимум; вузы обычно требуют 14
+text:                      # п. 6.1.1
+  font: Times New Roman    # «рекомендуемый тип шрифта»
+  size_pt_min: 12          # «не менее 12 пт»; вузы обычно требуют 14
   color: black
-  line_spacing: 1.5
+  line_spacing: 1.5        # для отчётов от 500 страниц допускается 1,0
   first_line_indent_cm: 1.25
-  alignment: justify
-  table_text_size_pt_min: null   # ГОСТ допускает меньший кегль в таблицах; минимум задаёт методичка
+  alignment: justify       # стандартом прямо не задано; общепринятая практика
+  table_text_size_pt_min: null   # минимум в таблицах стандарт не задаёт
 
-page_numbers:
+page_numbers:              # п. 6.3.1, 6.3.2
   style: arabic
   position: bottom_center
   trailing_dot: false
@@ -32,7 +35,7 @@ page_numbers:
   title_page_shown: false
 
 headings:
-  structural_elements:   # РЕФЕРАТ, СОДЕРЖАНИЕ, ВВЕДЕНИЕ, ЗАКЛЮЧЕНИЕ и т. д.
+  structural_elements:     # п. 6.2.1
     names:
       - СПИСОК ИСПОЛНИТЕЛЕЙ
       - РЕФЕРАТ
@@ -42,52 +45,63 @@ headings:
       - ВВЕДЕНИЕ
       - ЗАКЛЮЧЕНИЕ
       - СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ
+    required:              # раздел 4: обязательные элементы (кроме титульного листа и основной части)
+      - СПИСОК ИСПОЛНИТЕЛЕЙ
+      - РЕФЕРАТ
+      - СОДЕРЖАНИЕ
+      - ВВЕДЕНИЕ
+      - ЗАКЛЮЧЕНИЕ
     case: upper
     alignment: center
-    bold: true
+    bold: true             # п. 6.1.1: полужирный — для заголовков структурных элементов
     trailing_dot: false
     new_page: true
-  sections:
+  sections:                # п. 6.2.3, 6.4.1
     alignment: left
     first_line_indent_cm: 1.25
     bold: true
     trailing_dot: false
-    numbering: arabic    # 1, 1.1, 1.1.1
-    number_trailing_dot: false   # «1.1 Название», а не «1.1. Название» # TODO: сверить
+    numbering: arabic      # 1, 1.1, 1.1.1
+    number_trailing_dot: false
+    new_page_levels: [1]   # п. 6.2.1: каждый раздел основной части — с новой страницы
 
-appendices:
+appendices:                # п. 6.17.3
   heading_word: ПРИЛОЖЕНИЕ
   alignment: center
   new_page: true
 
-figures:
-  image_alignment: center   # TODO: сверить
+figures:                   # п. 6.5
+  image_alignment: center  # стандартом прямо не задано; практика — по центру, как и подпись
   caption_position: below
   caption_alignment: center
   caption_first_line_indent_cm: 0
   caption_format: "Рисунок {n} — {title}"
   caption_trailing_dot: false
-  references_required: true  # на каждый рисунок должна быть ссылка в тексте
+  caption_line_spacing: 1.0   # п. 6.5.8: многострочное наименование — через один интервал
+  references_required: true
 
-tables:
+tables:                    # п. 6.6
   caption_position: above
   caption_alignment: left
   caption_first_line_indent_cm: 0
   caption_format: "Таблица {n} — {title}"
   caption_trailing_dot: false
+  caption_line_spacing: 1.0   # п. 6.6.3
   references_required: true
 
-formulas:
+formulas:                  # п. 6.8.3
+  alignment: center
   numbering: "({n})"
   number_alignment: right
 
-bibliography:
+bibliography:              # п. 6.16
   heading: СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ
-  heading_aliases:          # распознаём, но предлагаем заменить на heading
+  heading_aliases:         # распознаём, но предлагаем заменить на heading
     - СПИСОК ЛИТЕРАТУРЫ
     - СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ
     - БИБЛИОГРАФИЧЕСКИЙ СПИСОК
     - ИСТОЧНИКИ
   standard: ГОСТ Р 7.0.100-2018
-  order: by_citation     # TODO: сверить, допускается ли алфавитный порядок
-  citation_style: "[{n}]"
+  order: by_citation       # «в порядке появления ссылок в тексте»
+  entry_number: "{n}."     # «нумеровать арабскими цифрами с точкой»
+  citation_style: "[{n}]"  # п. 6.9.1

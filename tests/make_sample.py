@@ -81,5 +81,40 @@ def build(path: str):
     doc.save(path)
 
 
+def build_dissertation(path: str):
+    """Диссертация с типичными нарушениями ГОСТ Р 7.0.11-2011."""
+    doc = Document()
+    normal = doc.styles["Normal"]
+    normal.font.name = "Times New Roman"
+    normal.font.size = Pt(16)                    # больше 14 пт
+    s = doc.sections[0]
+    s.page_width, s.page_height = Mm(210), Mm(297)
+    s.left_margin, s.right_margin, s.top_margin, s.bottom_margin = Mm(30), Mm(15), Mm(20), Mm(20)
+
+    for line in ("Университет", "На правах рукописи", "Иванов Иван Иванович",
+                 "МЕТОДЫ АНАЛИЗА", "Диссертация на соискание учёной степени кандидата наук", "Москва 2026"):
+        doc.add_paragraph(line).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.paragraphs[-1].add_run().add_break(WD_BREAK.PAGE)
+
+    doc.add_paragraph("Оглавление").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph("Введение\t3")
+    doc.add_paragraph("Введение").runs[0].add_break(WD_BREAK.PAGE)
+    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = doc.add_paragraph("Актуальность темы исследования обусловлена [1], [2].")
+    p.paragraph_format.first_line_indent = Cm(2.5)   # больше 17 мм
+    doc.add_heading("Глава 1. Обзор методов.", level=1)   # слева, с точкой, не с новой страницы
+    doc.add_paragraph("Текст главы со ссылкой на рисунок 1.")
+    doc.add_paragraph().add_run().add_picture(BytesIO(tiny_png()), width=Cm(6))
+    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph("Рисунок 1 - Схема")
+    doc.add_paragraph("Заключение").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph("Итоги исследования.")
+    doc.add_paragraph("Список литературы").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph("Петров, П. П. Анализ / П. П. Петров. – Москва : Наука, 2020. – 100 с.")
+    doc.add_paragraph("Иванов, И. И. Методы / И. И. Иванов. – Москва : Наука, 2021. – 120 с.")
+    doc.save(path)
+
+
 if __name__ == "__main__":
-    build(sys.argv[1] if len(sys.argv) > 1 else "tests/samples/bad_coursework.docx")
+    out = sys.argv[1] if len(sys.argv) > 1 else "tests/samples/bad_coursework.docx"
+    (build_dissertation if "dissert" in out else build)(out)
